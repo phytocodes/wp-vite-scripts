@@ -1,0 +1,15 @@
+{
+  "name": "wp-env-scripts",
+  "version": "0.0.1",
+  "type": "module",
+  "bin": {
+    "wp-start-dev": "./bin/start-dev.js",
+    "wp-optimize-images": "./bin/optimize-public-images.js",
+    "wp-sync": "./bin/sync.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.0",
+    "cross-spawn": "^7.0.6",
+    "sharp": "^0.34.3"
+  }
+}
