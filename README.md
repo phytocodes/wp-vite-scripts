@@ -52,6 +52,7 @@ wp-sync <command>
 
 - 例: wp-sync push / wp-sync pull / wp-sync db:export:prod
 
-## ライセンス
+## 免責文
 
-MIT
+このプロジェクトはまだ初期開発段階 (0.x 系) にあります。  
+安定性や後方互換性は保証されません。利用は自己責任でお願いします。
