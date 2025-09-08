@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+
+/**
+ * @author: phytocodes
+ * @see: https://github.com/phytocodes
+ */
+
 import 'dotenv/config';
 import sharp from 'sharp';
 import { promises as fs } from 'fs';

@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+
+/**
+ * @author: phytocodes
+ * @see: https://github.com/phytocodes
+ */
+
 import { sync, spawn } from 'cross-spawn';
 import path from 'path';
 import fs from 'fs';

@@ -1,6 +1,11 @@
 {
   "name": "wp-env-scripts",
   "version": "0.0.1",
+  "author": {
+    "name": "phytocodes",
+    "url": "https://github.com/phytocodes"
+  },
+  "private": true,
   "type": "module",
   "bin": {
     "wp-start-dev": "./bin/start-dev.js",
