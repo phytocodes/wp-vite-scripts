@@ -1,235 +1,434 @@
 #!/usr/bin/env node
-import readline from 'readline';
-import { spawnSync } from 'child_process';
-import 'dotenv/config';
-import fs from 'fs';
+import fs from "fs";
+import path from "path";
+import { spawn } from "child_process";
+import minimist from "minimist";
+import readline from "readline";
 
-// 環境変数を取得
-const ENV = process.env;
-const WP = ENV.WP_CLI_BIN || 'wp';
+// -- 定数と初期設定 --
+const CONFIG_FILENAME = "sync.config.json";
+const DEFAULT_BACKUP_DIR = "sql";
+const LOG_FILENAME = "sync.log";
 
-// 必須環境変数のチェック
-const requiredVars = ['VITE_THEMES_DIR', 'SSH_ALIAS', 'STAGING_WP_ROOT', 'STAGING_DOMAIN', 'VITE_LOCAL_DOMAIN', 'PROD_DOMAIN'];
-const missingVars = requiredVars.filter(varName => !ENV[varName]);
-if (missingVars.length > 0) {
-	console.error(`Error: Missing required environment variables: ${missingVars.join(', ')}`);
-	console.error('Run `cp .env.example .env` and configure the values.');
+// -- 設定ファイル読み込み --
+const configPath = path.join(process.cwd(), CONFIG_FILENAME);
+if (!fs.existsSync(configPath)) {
+	console.error(`❌ ${CONFIG_FILENAME} not found. Please create one in project root.`);
 	process.exit(1);
 }
+const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
 
-// 確認用関数
-function ask(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-	return new Promise((resolve) => {
-		rl.question(question, (answer) => {
-			rl.close();
-			resolve(answer.toLowerCase());
-		});
-	});
-}
+// -- ログユーティリティ（ローテーション付き） --
+const logFilePath = path.join(process.cwd(), LOG_FILENAME);
+const MAX_LOG_SIZE = 10 * 1024 * 1024; // 10MB
 
-// コマンド実行ヘルパー
-const runCommand = (command, args, options = { stdio: 'inherit', shell: true }) => {
-	console.log(`Executing: ${command} ${args.join(' ')}`);
-	const result = spawnSync(command, args, options);
-	if (result.error || result.status !== 0) {
-		console.error(`Error executing: ${command} ${args.join(' ')}`);
-		console.error(result.stderr ? result.stderr.toString() : 'No stderr output.');
-		process.exit(1);
-	}
-	return result;
-};
+const log = (message) => {
+	const timestamp = new Date().toISOString();
+	const logMessage = `[${timestamp}] ${message}\n`;
+	console.log(logMessage.trim());
 
-// ファイル同期
-const syncFiles = (direction, localPath, remotePath, exclude = [], deleteMode = true) => {
-	if (direction === 'push' && !fs.existsSync(localPath)) {
-		console.error(`Error: Local path does not exist: ${localPath}`);
-		process.exit(1);
-	}
-	if (direction === 'pull' && !fs.existsSync(localPath)) {
-		fs.mkdirSync(localPath, { recursive: true });
-		console.log(`Created local directory: ${localPath}`);
-	}
-	console.log(`\n📂 Syncing ${direction === 'push' ? 'to' : 'from'} ${remotePath}...`);
-
-	const rsyncArgs = ['-avz', '--chmod=F644,D755', '--exclude-from', '.rsyncignore'];
-	if (deleteMode) rsyncArgs.push('--delete');
-
-	rsyncArgs.push(
-		direction === 'push' ? localPath : `${ENV.SSH_ALIAS}:${remotePath}`,
-		direction === 'push' ? `${ENV.SSH_ALIAS}:${remotePath}` : localPath
-	);
-
-	runCommand('rsync', rsyncArgs);
-	console.log(`✅ Successfully ${direction}ed files: ${localPath}`);
-};
-
-// プラグイン状態同期
-const syncPluginStatus = (direction) => {
-	console.log(`\n🔄 Syncing plugin activation status...`);
-	if (direction === 'push') {
-		const activePlugins = runCommand(
-			'npx',
-			['wp-env', 'run', 'cli', 'wp', 'plugin', 'list', '--status=active', '--field=name', '--allow-root'],
-			{ stdio: 'pipe' }
-		).stdout.toString().trim().split('\n').join(' ');
-		runCommand('ssh', [ENV.SSH_ALIAS, `cd ${ENV.STAGING_WP_ROOT} && ${WP} plugin deactivate --all && ${WP} plugin activate ${activePlugins || ''}`]);
-		console.log('✅ Plugin status pushed successfully.');
-	} else {
-		const activePlugins = runCommand(
-			'ssh',
-			[ENV.SSH_ALIAS, `cd ${ENV.STAGING_WP_ROOT} && ${WP} plugin list --status=active --field=name`],
-			{ stdio: 'pipe' }
-		).stdout.toString().trim().split('\n').join(' ');
-		runCommand('npx', ['wp-env', 'run', 'cli', 'wp', 'plugin', 'deactivate', '--all', '--allow-root']);
-		if (activePlugins) {
-			runCommand('npx', ['wp-env', 'run', 'cli', 'wp', 'plugin', 'activate', activePlugins, '--allow-root']);
-		}
-		console.log('✅ Plugin status pulled successfully.');
-	}
-};
-
-// データベース同期
-const syncDatabase = async (direction) => {
-	console.log(`\n💾 Syncing database...`);
-	const timestamp = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })
-		.replace(/[-:]/g, '').replace(/[^\d]/g, '').slice(0, 14);
-
-	if (direction === 'push') {
-		const answer = await ask("Are you sure you want to overwrite the REMOTE database? (y/n) ");
-		if (answer !== "y") {
-			console.log("Cancelled.");
-			process.exit(0);
-		}
-
-		// 1. リモートDBバックアップ
-		const remoteBackupCmd = `cd ${ENV.STAGING_WP_ROOT} && ${WP} db export -`;
-		const backupResult = spawnSync('ssh', [ENV.SSH_ALIAS, remoteBackupCmd], { encoding: 'utf-8', maxBuffer: 1024 * 1024 * 100 });
-		if (backupResult.error || backupResult.status !== 0) {
-			console.error(`❌ Error remote backup: ${backupResult.error?.message || backupResult.stderr}`);
-			process.exit(1);
-		}
-		fs.writeFileSync(`sql/remote-backup-before-push-${timestamp}.sql`, backupResult.stdout);
-
-		// 2. ローカルDBエクスポート
-		runCommand('npx', ['wp-env', 'run', 'cli', 'wp', 'db', 'export', `sql/local-backup-${timestamp}.sql`, '--allow-root']);
-
-		// 3. ローカルをリモートにインポート + search-replace --precise
-		const latestLocalSql = fs.readdirSync('sql').filter(f => f.startsWith('local-backup-')).sort().reverse()[0];
-		const localDump = fs.readFileSync(`sql/${latestLocalSql}`);
-		const importCmd = `cd ${ENV.STAGING_WP_ROOT} && ${WP} db import - && ${WP} search-replace '${ENV.VITE_LOCAL_DOMAIN}' '${ENV.STAGING_DOMAIN}' --all-tables --precise`;
-		const importResult = spawnSync('ssh', [ENV.SSH_ALIAS, importCmd], {
-			input: localDump,
-			encoding: 'utf-8',
-			maxBuffer: 1024 * 1024 * 100,
-		});
-		if (importResult.error || importResult.status !== 0) {
-			console.error(`❌ Error remote import: ${importResult.error?.message || importResult.stderr}`);
-			process.exit(1);
-		}
-		console.log('✅ Database pushed and URLs replaced successfully.');
-
-	} else {
-		const answer = await ask("Are you sure you want to overwrite the LOCAL database? (y/n) ");
-		if (answer !== "y") {
-			console.log("Cancelled.");
-			process.exit(0);
-		}
-
-		// 1. ローカルバックアップ
-		runCommand('npx', ['wp-env', 'run', 'cli', 'wp', 'db', 'export', `sql/local-backup-before-pull-${timestamp}.sql`, '--allow-root']);
-
-		// 2. リモートDB取得
-		const remoteDumpCmd = `cd ${ENV.STAGING_WP_ROOT} && ${WP} db export -`;
-		const dumpResult = spawnSync('ssh', [ENV.SSH_ALIAS, remoteDumpCmd], { encoding: 'utf-8', maxBuffer: 1024 * 1024 * 100 });
-		if (dumpResult.error || dumpResult.status !== 0) {
-			console.error(`❌ Error remote dump: ${dumpResult.error?.message || dumpResult.stderr}`);
-			process.exit(1);
-		}
-		fs.writeFileSync(`sql/remote-backup-${timestamp}.sql`, dumpResult.stdout);
-
-		// 3. ローカルにインポート + search-replace --precise
-		const latestRemoteSql = fs.readdirSync('sql').filter(f => f.startsWith('remote-backup-')).sort().reverse()[0];
-		runCommand('npx', ['wp-env', 'run', 'cli', 'wp', 'db', 'import', `sql/${latestRemoteSql}`, '--allow-root']);
-		runCommand('npx', ['wp-env', 'run', 'cli', 'wp', 'search-replace', ENV.STAGING_DOMAIN, ENV.VITE_LOCAL_DOMAIN, '--all-tables', '--precise', '--allow-root']);
-		console.log('✅ Database pulled and URLs replaced successfully.');
-	}
-};
-
-// 本番用 DB エクスポート
-const exportProd = () => {
-	console.log('\n📦 Running pull before export...');
-	syncDatabase('pull');
-	runCommand('npx', ['wp-env', 'run', 'cli','wp', 'search-replace', ENV.VITE_LOCAL_DOMAIN, ENV.PROD_DOMAIN, '--all-tables', '--precise', '--export=sql/prod.sql', '--allow-root']);
-	console.log('✅ Exported production SQL: sql/prod.sql');
-	console.log('⚠️  NOTE: This file is for production import only. Do NOT import into local or staging.');
-};
-
-// メイン処理
-const main = () => {
-	if (!process.env.SSH_AUTH_SOCK) {
-		console.error("Error: ssh-agent is not running. Please run `eval $(ssh-agent)` and `ssh-add`.");
-		process.exit(1);
-	}
-
-	const [direction, ...args] = process.argv.slice(2);
-
-	if (direction === 'db:export:prod') {
-		exportProd();
-		return;
-	}
-
-	if (!['push', 'pull'].includes(direction)) {
-		console.error('Invalid direction. Use "push", "pull", or "db:export:prod".');
-		process.exit(1);
-	}
-
-	// オプション解析
-	const map = { t:'theme', p:'plugins', l:'languages', u:'uploads', d:'database' };
-	let opts = [];
-	args.forEach(arg => {
-		if (arg === '--all') {
-			opts = ['theme','plugins','languages','uploads','database','plugin-status'];
-		} else if (arg.startsWith('-')) {
-			arg.slice(1).split('').forEach(f => map[f] && opts.push(map[f]));
-		}
-	});
-	if (opts.length === 0) {
-		console.error('❌ No options specified. Use flags like -t, -pu, -d or --all');
-		process.exit(1);
-	}
-
-	(async () => {
-		for (const opt of opts) {
-			switch (opt) {
-				case 'theme':
-					syncFiles(direction, `./${ENV.VITE_THEMES_DIR}/`, `${ENV.STAGING_WP_ROOT}/wp-content/themes/${ENV.VITE_THEMES_DIR}/`);
-					break;
-				case 'plugins':
-					syncFiles(direction, './plugins/', `${ENV.STAGING_WP_ROOT}/wp-content/plugins/`, ['node_modules/', 'wp-vite-hmr/']);
-					if (direction === 'push') syncPluginStatus(direction);
-					break;
-				case 'languages':
-					syncFiles(direction, './languages/', `${ENV.STAGING_WP_ROOT}/wp-content/languages/`);
-					break;
-				case 'uploads':
-					syncFiles(direction, './uploads/', `${ENV.STAGING_WP_ROOT}/wp-content/uploads/`, [], false);
-					break;
-				case 'database':
-					await syncDatabase(direction);
-					break;
-				case 'plugin-status':
-					syncPluginStatus(direction);
-					break;
-				default:
-					console.error(`Invalid option: ${opt}`);
-					process.exit(1);
+	try {
+		if (fs.existsSync(logFilePath)) {
+			const stats = fs.statSync(logFilePath);
+			if (stats.size > MAX_LOG_SIZE) {
+				fs.renameSync(logFilePath, logFilePath + "." + Date.now());
 			}
 		}
-	})();
+		fs.appendFileSync(logFilePath, logMessage);
+	} catch (err) {
+		console.error("❌ Failed to write log:", err.message);
+	}
 };
+
+// -- ユーティリティ --
+const ask = (q) => {
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	return new Promise((resolve) =>
+		rl.question(q, (ans) => {
+			rl.close();
+			resolve(ans.trim().toLowerCase());
+		})
+	);
+};
+
+const confirm = async ({ message, expected }) => {
+	const ans = await ask(message);
+	return ans === expected.toLowerCase();
+};
+
+const runAsync = (cmd, args = [], opts = {}) => {
+	return new Promise((resolve, reject) => {
+		if (opts.dryRun) {
+			console.log(`[DRY-RUN] 👉 ${cmd} ${args.join(" ")}`);
+			return resolve();
+		}
+		console.log(`👉 ${cmd} ${args.join(" ")}`);
+		const proc = spawn(cmd, args, { stdio: "inherit", ...opts });
+		proc.on("close", (code) =>
+			code === 0 ? resolve() : reject(new Error(`${cmd} exited with ${code}`))
+		);
+		proc.on("error", reject);
+	});
+};
+
+const resolveBackupDir = (envName) => {
+	const baseDir = path.join(process.cwd(), DEFAULT_BACKUP_DIR);
+	const dir = path.join(baseDir, envName);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+};
+
+const normalizeDomain = (urlString) => {
+	try {
+		return new URL(urlString).host;
+	} catch {
+		return urlString.replace(/^https?:\/\//, "").replace(/\/$/, "");
+	}
+};
+
+// -- 環境解決 --
+const resolveEnvironment = (cliEnv, config, { requireExplicit = false } = {}) => {
+	const envs = Object.keys(config.environments || {});
+
+	if (cliEnv) {
+		if (!envs.includes(cliEnv)) {
+			console.error(`❌ Unknown environment "${cliEnv}". Available: ${envs.join(", ")}`);
+			process.exit(1);
+		}
+		return cliEnv;
+	}
+
+	if (requireExplicit) {
+		console.error(`❌ -e <env> is required for this command. Available: ${envs.join(", ")}`);
+		process.exit(1);
+	}
+
+	if (envs.length === 1) {
+		return envs[0];
+	}
+
+	console.error(`❌ -e <env> is required. Available: ${envs.join(", ")}`);
+	process.exit(1);
+};
+
+// -- rsync --
+const syncFiles = async (direction, env, localDir, remoteDir, exclude = [], deleteMode = true, dryRun = false) => {
+	const localSource = path.resolve(localDir) + path.sep;
+	const remoteSource = `${env.sshAlias}:${path.posix.join(remoteDir, "")}` + path.sep;
+
+	// 環境ごとの exclude のみ
+	const fullExclude = [...(env.exclude || []), ...exclude];
+
+	// exclude を --exclude=pattern として展開
+	const rsyncArgs = [
+		"-avz",
+		"--no-perms",
+		"--chmod=F644,D755",
+		"--progress",
+		...fullExclude.map((p) => `--exclude=${p}`)
+	];
+	if (deleteMode) rsyncArgs.push("--delete");
+
+	if (direction === "push") {
+		if (!fs.existsSync(localSource)) {
+			console.error(`❌ Local path not found: ${localSource}`);
+			process.exit(1);
+		}
+		await runAsync("rsync", [...rsyncArgs, localSource, remoteSource], { dryRun });
+	} else {
+		if (!fs.existsSync(localSource)) {
+			fs.mkdirSync(localSource, { recursive: true });
+		}
+		await runAsync("rsync", [...rsyncArgs, remoteSource, localSource], { dryRun });
+	}
+	log(`✅ File sync (${direction}) complete for ${localDir}.`);
+};
+
+
+// -- DB helpers --
+const pipeProcesses = (srcCmd, srcArgs, snkCmd, snkArgs, dryRun = false) => {
+	if (dryRun) {
+		console.log(`[DRY-RUN] 👉 ${srcCmd} ${srcArgs.join(" ")} -> ${snkCmd} ${snkArgs.join(" ")}`);
+		return Promise.resolve();
+	}
+	return new Promise((resolve, reject) => {
+		const src = spawn(srcCmd, srcArgs, { stdio: ["ignore", "pipe", "pipe"] });
+		const snk = spawn(snkCmd, snkArgs, { stdio: ["pipe", "inherit", "pipe"] });
+
+		src.stdout.pipe(snk.stdin);
+		src.stderr.pipe(process.stderr);
+		snk.stderr.pipe(process.stderr);
+
+		let srcExited = false, snkExited = false, errorOccurred = false;
+
+		const checkExit = () => {
+			if (srcExited && snkExited && !errorOccurred) resolve();
+		};
+
+		src.on("close", (code) => {
+			srcExited = true;
+			if (code !== 0 && !errorOccurred) {
+				errorOccurred = true;
+				return reject(new Error(`Source exited with code ${code}`));
+			}
+			checkExit();
+		});
+
+		snk.on("close", (code) => {
+			snkExited = true;
+			if (code !== 0 && !errorOccurred) {
+				errorOccurred = true;
+				return reject(new Error(`Sink exited with code ${code}`));
+			}
+			checkExit();
+		});
+
+		src.on("error", (err) => { if (!errorOccurred) { errorOccurred = true; reject(err); }});
+		snk.on("error", (err) => { if (!errorOccurred) { errorOccurred = true; reject(err); }});
+	});
+};
+
+const exportLocalDB = async (wpBin, dumpPath, dryRun = false) => {
+	if (dryRun) {
+		console.log(`[DRY-RUN] 👉 Exporting local DB to ${dumpPath}`);
+		return;
+	}
+	try {
+		await new Promise((resolve, reject) => {
+			const args = [...wpBin.split(" "), "db", "export", "-", "--allow-root", "--single-transaction", "--quick"];
+			const proc = spawn(args[0], args.slice(1), { stdio: ["ignore", "pipe", "inherit"] });
+			const out = fs.createWriteStream(dumpPath);
+			proc.stdout.pipe(out);
+			proc.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`wp export failed with code ${code}`))));
+			proc.on("error", reject);
+		});
+	} catch (err) {
+		console.error(`❌ Local export failed: ${err.message}`);
+		process.exit(1);
+	}
+};
+
+const exportRemoteDB = async (env, dumpPath, dryRun = false, replaceDomain = false) => {
+	if (dryRun) {
+		console.log(`[DRY-RUN] 👉 Exporting remote DB to ${dumpPath}`);
+		return;
+	}
+	try {
+		await new Promise((resolve, reject) => {
+			let wpCmd;
+			if (replaceDomain) {
+				const remoteDomain = normalizeDomain(env.domain);
+				wpCmd = `${env.wpBin || "wp"} search-replace '${remoteDomain}' '${normalizeDomain(replaceDomain)}' --all-tables --export=-`;
+			} else {
+				wpCmd = `${env.wpBin || "wp"} db export - --single-transaction --quick`;
+			}
+			const cmd = "ssh";
+			const args = [env.sshAlias, `cd ${env.wpRoot} && ${wpCmd}`];
+			const proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "inherit"] });
+			const out = fs.createWriteStream(dumpPath);
+			proc.stdout.pipe(out);
+			proc.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`SSH export failed with code ${code}`))));
+			proc.on("error", reject);
+		});
+	} catch (err) {
+		console.error(`❌ Remote export failed: ${err.message}`);
+		process.exit(1);
+	}
+};
+
+// -- DB Sync --
+const syncDatabase = async (direction, envName, env, localDomain, remoteDomain, dryRun = false) => {
+	const ts = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+	const localBackupDir = resolveBackupDir("local");
+	const remoteBackupDir = resolveBackupDir(envName);
+
+	const wpBinLocal = config.environments.local?.wpBin || config.wpBin || "wp";
+	const wpOptions = [
+		"--precise", "--recurse-objects", "--skip-columns=guid",
+		"--report-changed-only", "--skip-plugins", "--skip-themes",
+		"--all-tables", "--allow-root"
+	];
+
+	const multisite = config.multisite || false;
+	if (multisite) wpOptions.push("--network");
+
+	if (direction === "push") {
+		const ok = await confirm({ message: "⚠️ Overwrite REMOTE DB? (y/n) ", expected: "y" });
+		if (!ok) process.exit(0);
+
+		const localDumpPath = path.join(localBackupDir, `local-backup-${ts}.sql`);
+		await exportLocalDB(wpBinLocal, localDumpPath, dryRun);
+
+		if (dryRun) return;
+
+		console.log("👉 Piping local DB (with search-replace) to remote import...");
+		await pipeProcesses(
+			wpBinLocal.split(" ")[0], [...wpBinLocal.split(" ").slice(1), "search-replace", ...wpOptions, localDomain, remoteDomain, "--export"],
+			"ssh", [env.sshAlias, `cd ${env.wpRoot} && ${env.wpBin || "wp"} db import -`]
+		);
+		log("✅ Remote DB sync (push) complete.");
+	} else {
+		const ok = await confirm({ message: "⚠️ Overwrite LOCAL DB? (y/n) ", expected: "y" });
+		if (!ok) process.exit(0);
+
+		const localBeforePullBackupPath = path.join(localBackupDir, `local-backup-before-pull-${ts}.sql`);
+		await exportLocalDB(wpBinLocal, localBeforePullBackupPath, dryRun);
+
+		const remoteBackupPath = path.join(remoteBackupDir, `remote-backup-${ts}.sql`);
+		console.log("👉 Exporting remote DB to backup...");
+		await exportRemoteDB(env, remoteBackupPath, dryRun);
+
+		if (dryRun) return;
+
+		const transformedPath = path.join(localBackupDir, `transformed-${ts}.sql`);
+		console.log("👉 Performing search-replace on exported DB...");
+		await runAsync(wpBinLocal.split(" ")[0], [...wpBinLocal.split(" ").slice(1), "search-replace", ...wpOptions, remoteDomain, localDomain, "--export=" + transformedPath]);
+
+		console.log("👉 Importing transformed DB to local...");
+		await runAsync(wpBinLocal.split(" ")[0], [...wpBinLocal.split(" ").slice(1), "db", "import", transformedPath, "--allow-root"]);
+		log(`✅ Local DB sync (pull) complete. Backups retained: remote-backup-${ts}.sql, transformed-${ts}.sql.`);
+	}
+};
+
+// -- ヘルプ --
+const showHelp = () => {
+	console.log(`
+Usage:
+	node sync.js push -e <env> <targets...>
+	node sync.js pull -e <env> <targets...>
+	node sync.js db:export -e <env>
+
+Targets:
+	themes, plugins, muplugins, languages, uploads, database
+
+Options:
+	--all      Sync all targets
+	--dry-run  Test mode (rsync/WP-CLI dry-run, no changes)
+	--help     Show this help
+
+Notes:
+	-e <env> can be omitted for push/pull only if exactly 1 environment is defined
+	db:export always requires -e <env>.
+`);
+};
+
+// -- メイン --
+const main = async () => {
+	const argv = minimist(process.argv.slice(2));
+	const cmd = argv._[0];
+	const dryRun = argv["dry-run"] || false;
+	const useAll = argv.all || false;
+
+	if (!cmd || argv.help) {
+		showHelp();
+		process.exit(0);
+	}
+
+	if (cmd === "push" || cmd === "pull") {
+		const envName = resolveEnvironment(argv.e || argv.env, config);
+		let targets = argv._.filter((arg) => arg !== envName).slice(1);
+
+		const env = config.environments[envName];
+		if (!env) {
+			console.error(`❌ Unknown environment: ${envName}`);
+			process.exit(1);
+		}
+
+		if (cmd === "push" && envName === "production") {
+			console.log("⚠️ You are about to PUSH to PRODUCTION!");
+			const ok = await confirm({ message: "Type exactly 'I WANT TO PUSH' to continue: ", expected: "i want to push" });
+			if (!ok) process.exit(0);
+		}
+
+		const localFullDomain = config.environments.local?.domain;
+		if (!localFullDomain) {
+			console.error("❌ Local domain not defined in config.");
+			process.exit(1);
+		}
+		const remoteFullDomain = env.domain;
+		if (!remoteFullDomain) {
+			console.error(`❌ Domain not defined for environment ${envName}.`);
+			process.exit(1);
+		}
+
+		const localDomain = normalizeDomain(localFullDomain);
+		const remoteDomain = normalizeDomain(remoteFullDomain);
+
+		const map = {
+			themes: () => syncFiles(cmd, env, "wp-content/themes", path.posix.join(env.wpRoot, "wp-content/themes/"), [], true, dryRun),
+			plugins: () => syncFiles(cmd, env, "wp-content/plugins", path.posix.join(env.wpRoot, "wp-content/plugins/"), [], true, dryRun),
+			muplugins: () => syncFiles(cmd, env, "wp-content/mu-plugins", path.posix.join(env.wpRoot, "wp-content/mu-plugins/"), [], true, dryRun),
+			languages: () => syncFiles(cmd, env, "wp-content/languages", path.posix.join(env.wpRoot, "wp-content/languages/"), [], true, dryRun),
+			uploads: () => syncFiles(cmd, env, "wp-content/uploads", path.posix.join(env.wpRoot, "wp-content/uploads/"), [], false, dryRun),
+			database: () => syncDatabase(cmd, envName, env, localDomain, remoteDomain, dryRun),
+		};
+
+		if (!targets.length && !useAll) {
+			console.error("❌ No sync targets specified. Use --all or list targets.");
+			process.exit(1);
+		}
+
+		const selectedTargets = useAll ? Object.keys(map) : targets;
+
+		for (const t of selectedTargets) {
+			if (!map[t]) {
+				console.warn(`⚠️ Unknown sync target: ${t}`);
+				continue;
+			}
+			const allowed = env.syncOptions?.[t]?.[cmd];
+			if (allowed === false) {
+				console.error(`❌ ${cmd.toUpperCase()} of "${t}" is not allowed for environment "${envName}"`);
+				process.exit(1);
+			}
+			await map[t]();
+		}
+	}
+
+	if (cmd === "db:export") {
+		const envName = argv.e || argv.env;
+
+		if (!envName) {
+			console.error("❌ Error: Please specify environment with -e");
+			process.exit(1);
+		}
+		const env = config.environments[envName];
+		if (!env) {
+			console.error(`❌ Error: Unknown environment '${envName}'`);
+			process.exit(1);
+		}
+
+		// --replace=staging または --replace staging に対応
+		let replaceEnv = null;
+		if (argv.replace !== undefined) {
+			if (typeof argv.replace === "string") {
+				replaceEnv = argv.replace;
+			} else {
+				console.error("❌ Error: --replace requires an environment name (e.g. --replace=staging)");
+				process.exit(1);
+			}
+		}
+
+		// バックアップファイルパス生成
+		const dumpsDir = resolveBackupDir(envName);
+		const filename = `${envName}-${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14)}.sql`;
+		const dumpPath = path.join(dumpsDir, filename);
+
+		if (replaceEnv) {
+			const targetEnv = config.environments[replaceEnv];
+			if (!targetEnv) {
+				console.error(`❌ Error: Unknown environment '${replaceEnv}'. Available: ${Object.keys(config.environments).join(", ")}`);
+				process.exit(1);
+			}
+			console.log(`🔄 Replacing domain: ${env.domain} → ${targetEnv.domain}`);
+			await exportRemoteDB(env, dumpPath, dryRun, targetEnv.domain);
+		} else {
+			await exportRemoteDB(env, dumpPath, dryRun, false);
+		}
+
+		log(`✅ Export complete: ${dumpPath}`);
+	}
+
+
+}
 
 main();
