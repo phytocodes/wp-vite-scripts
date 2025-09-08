@@ -15,7 +15,7 @@ const CONFIG = {
 };
 
 // キャッシュディレクトリのパス
-const cacheDir = path.join(process.cwd(), '.image-cache');
+const cacheDir = path.join(process.cwd(), 'node_modules', '.cache', 'wp-images');
 const CACHE_FILE = path.join(cacheDir, '.cache.json');
 
 // 最終出力パス
