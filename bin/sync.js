@@ -187,7 +187,7 @@ const pipeProcesses = (srcCmd, srcArgs, snkCmd, snkArgs, dryRun = false) => {
 	}
 	return new Promise((resolve, reject) => {
 		const src = spawn(srcCmd, srcArgs, { stdio: ["ignore", "pipe", "pipe"] });
-		const snk = spawn(snkCmd, snkArgs, { stdio: ["pipe", "inherit", "pipe"] });
+		const snk = spawn(snkCmd, snkArgs, { stdio: ["pipe", "pipe", "pipe"] });
 
 		src.stdout.pipe(snk.stdin);
 		src.stderr.pipe(process.stderr);
@@ -408,7 +408,7 @@ const main = async () => {
 	});
 
 	const cmd = positionals[0];  // 位置引数の最初の要素 (push, pull, db:export)
-	const dryRun = values.dryRun ?? false;  // ?? でデフォルト false
+	const dryRun = values.dryRun || false;
 	const useAll = values.all ?? false;
 
 	if (!cmd || values.help) {
@@ -417,15 +417,20 @@ const main = async () => {
 	}
 
 	if (cmd === "push" || cmd === "pull") {
-		let envName = values.e;  // -e or --env の値
+		let envName = values.env;  // -e or --env の値
 		let targets = positionals.slice(1);  // 位置引数の残り (envName 除外は後処理)
 
 		// envName が位置引数から来る場合の処理 (例: push dev -t)
 		if (!envName && targets.length > 0) {
-			const potentialEnv = targets[0];
-			const tempEnv = resolveEnvironment(potentialEnv, config, { requireExplicit: false });
-			if (tempEnv) {
-				envName = targets.shift();
+			const potentialEnv = targets.find(t => !t.startsWith("-"));
+			// 先頭が "-" で始まるなら環境名ではなくオプション
+			if (potentialEnv) {
+				const tempEnv = resolveEnvironment(potentialEnv, config, { requireExplicit: false });
+				if (tempEnv) {
+					envName = potentialEnv;
+					// 環境名は targets から除去
+					targets = targets.filter(t => t !== potentialEnv);
+				}
 			}
 		}
 
