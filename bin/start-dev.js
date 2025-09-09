@@ -8,11 +8,6 @@
 import { sync, spawn } from 'cross-spawn';
 import path from 'path';
 import fs from 'fs';
-import { fileURLToPath } from 'url';
-
-// ESモジュール環境で __dirname を使用するための代替策
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 // --- 1. 定数と初期設定 ---
 
