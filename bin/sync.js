@@ -93,13 +93,21 @@ const runAsync = (cmd, args = [], opts = {}) => {
 			return resolve();
 		}
 		console.log(`👉 ${cmd} ${args.join(" ")}`);
-		const proc = spawn(cmd, args, { stdio: "inherit", ...opts });
+
+		const proc = spawn(cmd, args, { stdio: opts.outputFile ? ["ignore", "pipe", "inherit"] : "inherit" });
+
+		if (opts.outputFile) {
+			const out = fs.createWriteStream(opts.outputFile);
+			proc.stdout.pipe(out);
+		}
+
 		proc.on("close", (code) =>
 			code === 0 ? resolve() : reject(new Error(`${cmd} exited with ${code}`))
 		);
 		proc.on("error", reject);
 	});
 };
+
 
 const resolveBackupDir = (envName, isExportReplace = false) => {
 	const baseDir = path.join(process.cwd(), DEFAULT_BACKUP_DIR);
@@ -271,6 +279,41 @@ const exportRemoteDB = async (env, dumpPath, dryRun = false, replaceDomain = fal
 	}
 };
 
+const exportDB = async (env, dumpPath, dryRun = false, replaceDomain = null) => {
+	const wpBin = env.wpBin || "wp"; // ローカル or remote 用 wp コマンド
+	const baseArgs = wpBin.split(" "); // ["npx", "wp-env", "run", "cli", "wp"]
+
+	if (env.sshAlias) {
+		// リモートの場合
+		let cmd;
+		if (replaceDomain) {
+			cmd = [...baseArgs, "search-replace", shellEscape(env.domain), shellEscape(replaceDomain), "--all-tables", `--export=-`, "--allow-root"];
+		} else {
+			cmd = [...baseArgs, "db", "export", "-", "--allow-root", "--single-transaction", "--quick"];
+		}
+		const sshArgs = [env.sshAlias, `cd ${env.wpRoot} && ${cmd.join(" ")}`];
+
+		if (dryRun) {
+			console.log(`[DRY-RUN] 👉 ssh ${sshArgs.join(" ")} -> ${dumpPath}`);
+			return;
+		}
+
+		await runAsync("ssh", sshArgs, { outputFile: dumpPath });
+	} else {
+		// ローカルの場合
+		const args = replaceDomain
+			? [...baseArgs, "search-replace", shellEscape(env.domain), shellEscape(replaceDomain), "--all-tables", `--export=${dumpPath}`, "--allow-root"]
+			: [...baseArgs, "db", "export", dumpPath, "--allow-root", "--single-transaction", "--quick"];
+
+		if (dryRun) {
+			console.log(`[DRY-RUN] 👉 ${args.join(" ")}`);
+			return;
+		}
+
+		await runAsync(args[0], args.slice(1));
+	}
+};
+
 const runSearchReplace = async (target, fromDomain, toDomain, wpBin, wpRoot, wpOptions, dryRun = false) => {
 	if (dryRun) {
 		console.log(`[DRY-RUN] 👉 ${target} search-replace ${fromDomain} → ${toDomain}`);
@@ -382,6 +425,7 @@ Notes:
 
 // -- メイン --
 const main = async () => {
+
 	// util.parseArgs に置き換え
 	const { values, positionals, tokens } = parseArgs({
 		options: {
@@ -520,7 +564,7 @@ const main = async () => {
 	}
 
 	if (cmd === "db:export") {
-		const envName = values.e;  // values.e で -e/--env
+		const envName = values.env;
 		if (!envName) {
 			fatal("❌ Error: Please specify environment with -e");
 		}
@@ -529,35 +573,32 @@ const main = async () => {
 			fatal(`❌ Error: Unknown environment '${envName}'`);
 		}
 
-		let replaceEnv = null;
+		let replaceDomain = null;
 		if (values.replace !== undefined) {
 			if (typeof values.replace === "string") {
-				replaceEnv = values.replace;
+				const targetEnv = config.environments[values.replace];
+				if (!targetEnv) {
+					fatal(`❌ Error: Unknown environment '${values.replace}'. Available: ${Object.keys(config.environments).join(", ")}`);
+				}
+				replaceDomain = targetEnv.domain;
+				console.log(`🔄 Replacing domain: ${env.domain} → ${replaceDomain}`);
 			} else {
 				fatal("❌ Error: --replace requires an environment name (e.g. --replace=staging)");
 			}
 		}
 
-		// 保存先: --replace の場合は exports、それ以外は環境ごと
-		const dumpsDir = resolveBackupDir(envName, !!replaceEnv);
-		const filename = replaceEnv
-			? `${envName}-to-${replaceEnv}-${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14)}.sql`
+		const dumpsDir = resolveBackupDir(envName, !!replaceDomain);
+		const filename = replaceDomain
+			? `${envName}-to-${values.replace}-${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14)}.sql`
 			: `${envName}-${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14)}.sql`;
 		const dumpPath = path.join(dumpsDir, filename);
+		const relativeDumpPath = path.relative(process.cwd(), dumpPath);
 
-		if (replaceEnv) {
-			const targetEnv = config.environments[replaceEnv];
-			if (!targetEnv) {
-				fatal(`❌ Error: Unknown environment '${replaceEnv}'. Available: ${Object.keys(config.environments).join(", ")}`);
-			}
-			console.log(`🔄 Replacing domain: ${env.domain} → ${targetEnv.domain}`);
-			await exportRemoteDB(env, dumpPath, dryRun, targetEnv.domain);
-		} else {
-			await exportRemoteDB(env, dumpPath, dryRun, false);
-		}
+		await exportDB(env, relativeDumpPath, dryRun, replaceDomain);
 
 		log(`✅ Export complete: ${dumpPath}`);
 	}
+
 };
 
 main();
