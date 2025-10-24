@@ -15,7 +15,8 @@ const CONFIG = {
 	extensions: process.env.IMAGE_EXTENSIONS?.split(',') || ['.jpg', '.jpeg', '.png'],
 	webpQuality: parseInt(process.env.WEBP_QUALITY, 10) || 75,
 	publicDir: process.env.PUBLIC_DIR || 'public',
-	distDir: process.env.VITE_ASSETS_DIR || 'dist',
+	themesDir: process.env.VITE_THEMES_DIR || 'dist',
+	assetsDir: process.env.VITE_ASSETS_DIR || 'dist/assets',
 	logLevel: process.env.LOG_LEVEL || 'info',
 	maxConcurrency: parseInt(process.env.MAX_CONCURRENCY, 10) || 10, // 並列処理の最大数
 };
@@ -25,7 +26,7 @@ const cacheDir = path.join(process.cwd(), 'node_modules', '.cache', 'wp-images')
 const CACHE_FILE = path.join(cacheDir, '.cache.json');
 
 // 最終出力パス
-const publicDistDir = path.join(CONFIG.distDir);
+const publicDistDir = path.join(CONFIG.themesDir, CONFIG.assetsDir);
 
 // キャッシュ
 let cache = {};
@@ -236,7 +237,7 @@ export async function optimizeImages() {
 	}
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && process.argv[1].includes('optimize-public-images.js')) {
 	optimizeImages().catch(error => {
 		console.error('An unhandled error occurred:', error);
 		process.exit(1);
