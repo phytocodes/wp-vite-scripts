@@ -9,7 +9,7 @@
   "type": "module",
   "bin": {
     "wp-start-dev": "./bin/start-dev.js",
-    "wp-optimize-images": "./bin/optimize-public-images.js",
+    "wp-optimize-public-images": "./bin/optimize-public-images.js",
     "wp-sync": "./bin/sync.js"
   },
   "dependencies": {
