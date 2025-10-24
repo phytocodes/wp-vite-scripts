@@ -205,7 +205,7 @@ export async function optimizeImages() {
 		for (const file of allCachedFiles) {
 			if (file === '.cache.json') continue;
 			const sourcePath = path.join(cacheDir, file);
-			const destPath = path.join(publicDistDir, file);
+			const destPath = path.join(publicDistDir, 'images', file);
 
 			try {
 				const stats = await fs.stat(sourcePath);
@@ -237,9 +237,12 @@ export async function optimizeImages() {
 	}
 }
 
-if (process.argv[1] && process.argv[1].includes('optimize-public-images.js')) {
-	optimizeImages().catch(error => {
-		console.error('An unhandled error occurred:', error);
-		process.exit(1);
-	});
+const isDirectlyExecuted = import.meta.url === `file://${process.argv[1]}`;
+const isNpmExecuted = process.env.npm_lifecycle_event === 'wp-optimize-public-images';
+
+if (isDirectlyExecuted || isNpmExecuted) {
+  optimizeImages().catch(error => {
+    console.error('An unhandled error occurred:', error);
+    process.exit(1);
+  });
 }
