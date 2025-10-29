@@ -205,7 +205,7 @@ export async function optimizeImages() {
 		for (const file of allCachedFiles) {
 			if (file === '.cache.json') continue;
 			const sourcePath = path.join(cacheDir, file);
-			const destPath = path.join(publicDistDir, 'images', file);
+			const destPath = path.join(publicDistDir, file);
 
 			try {
 				const stats = await fs.stat(sourcePath);
